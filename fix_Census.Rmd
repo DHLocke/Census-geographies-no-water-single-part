@@ -1,0 +1,361 @@
+---
+title: "fix Census"
+author: "Dexter H. Locke, PhD"
+date: "`r format(Sys.time())`"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Basically many block groups oftentimes have multipart polygons. So in a GIS a single row corresponds to multiple discrete and independent locations. The State of Hawaii comprised of several islands being a single row, as opposed to one row per island in a GIS is the textbook example of multipart polygons. Why this matters is because when we move Census data into other geographies like drive time polygons in this particular project, or into Baltimore City neighborhoods, we rely on the area of overlap to get Census data into those other polygons. Well that area is all messed up with multiparts since the area corresponds to all sub-polygons combined - *which might not necessarily be the ones that overlap*. 
+
+A second issue with the block groups for our demographic analyses (and yes I wish I realized this before publishing a few dozen papers with US Census data) is that within a block group polygon there are non-residential areas. Ok, but we don't have to go down some crazy rabbit hole of adjusting by building area, building floor area ratio... ect for every block group in the whole US, but we can improve the precision and realism of the geographic data some by erasing the water area; people don't reside in rivers, lakes, streams and other water bodies Census does map. So I erased those water features out of all block groups.
+
+The result of rectifying both the multipart polygon issue and the water issue is an improved analysis-ready set of polygons. It was very computationally intensive to do this - which might explain why this isn't widely available already, and why making this available to others might be of value.
+
+
+
+# 0 load libraries, get oriented, make a figures folder if one doesn't exist
+```{r}
+# Load libraries 
+packs <-c('tidyverse'   # cuz
+          , 'tidylog'   # prints out what was done in dplyr and tidyr; VERBOSE
+          , 'magrittr'  # for all of the the pipes
+          , 'sf'        # for spatial data support
+          , 'tidycensus'# for accessing Census and ACS data
+          , 'tigris'    # supports sptial census work, like state boundaries and plotting
+          # , 'sfweight'  # pipe-friendly weights matricies
+          # , 'janitor'   # helps clean things, pipe-friendly
+          # , 'mapview'   # web maps for zooming and panning around
+          , 'beepr'     # makes noises
+          , 'tictoc'    # times things
+          , 'parallel'  # parallel processing, vroom, vroom
+          )
+
+if (length(setdiff(packs, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packs, rownames(installed.packages())))
+}
+
+# load the packages all at once
+vapply(packs, library, character.only = TRUE, logical(1),
+       logical.return = TRUE, quietly = TRUE)
+
+# get oriented
+list.files()
+list.files('data')
+
+
+# setting for get_acs, Census API key
+census_api_key('db9b3481879b9e79eb8c86608656c3c8a8640bbb', install = TRUE, overwrite = TRUE)
+readRenviron("~/.Renviron")
+options(tigris_use_cache = TRUE)
+
+# custom function for "Not In"
+`%nin%` <- Negate(`%in%`)
+
+# via @etiennebr
+# https://github.com/r-spatial/sf/issues/1280
+st_erase = function(x, y) {
+  st_difference(
+    x %>% st_buffer(0), 
+    st_union(st_combine(st_geometry(y))) %>% st_buffer(0))
+  }
+# 
+# # Paralise any simple features analysis.
+# # https://www.spatialanalytics.co.nz/post/2017/09/11/a-parallel-function-for-spatial-analysis-in-r/
+# # define
+# st_par <- function(sf_df, sf_func, n_cores, ...){
+# 
+#   # Create a vector to split the data set up by.
+#   split_vector <- rep(1:n_cores, each = nrow(sf_df) / n_cores, length.out = nrow(sf_df))
+# 
+#   # Perform GIS analysis
+#   split_results <- split(sf_df, split_vector) %>%
+#     mclapply(function(x) sf_func(x, ...), mc.cores = n_cores)
+#   
+#   # Combine results back together. Method of combining depends on the output from the function.
+#   if (class(split_results[[1]]) == 'list' ){
+#     result <- do.call("c", split_results)
+#     names(result) <- NULL
+#   } else {
+#     result <- do.call("rbind", split_results)
+#   }
+#   
+#   # Return result
+#   return(result)
+# }
+
+
+# sf_use_s2(FALSE) # suppresses errors, allows st_erase to run
+
+# if 'data' directory does not exist, make one
+ifelse(!dir.exists(paste0(file.path('data'))), dir.create(file.path(paste0('data'))), FALSE)
+ifelse(!dir.exists(paste0(file.path('data/water_polygons'))), 
+       dir.create(file.path(paste0('data/water_polygons'))), FALSE)
+```
+
+
+# 1 downlaod in Census polygons (block groups)
+```{r}
+
+# this gets all state, state_code, and state_name
+state_code_abb <- fips_codes %>%
+  distinct(state, state_code, state_name) %>% 
+  filter(state %nin% c('UM', 'VI', 'MP', 'GU', 'AS')) # 50 + DC + PR
+                                                      # ACS is not available for UM, VI, MP, GU, AS
+
+goi <- 'block group' # Geography of interest (Where)
+                     # this will go into the tidycensus call, has to match API acceptable values
+yr <- 2017           # define year (When)
+(out_dir <- paste0(getwd(), '/data/', goi, '_', yr)) # helps put it all together
+
+# create subdirectories
+ifelse(!dir.exists(paste0(file.path(out_dir))),
+       dir.create(file.path(paste0(out_dir))), FALSE)
+
+ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water')),
+       dir.create(file.path(paste0(file.path(out_dir), '_no_water'))), FALSE)
+
+
+# download polygons
+tic(); cbg_ply <- get_acs(
+  state = state_code_abb$state
+  # state = c('RI', 'VT') # used for testing
+  , geography = goi
+  , variables = 'B03002_001' # total population, can't be blank..
+  , year = yr # 2017, 2013 - 2017
+  , output = 'wide'
+  , geometry = TRUE
+  , keep_geo_vars = TRUE
+  , moe_level = 95
+  ) %>%
+  filter(!st_is_empty(.)) %>%  # drop empty polygons
+  filter(B03002_001E != 0) %>% # do you want to remove areas with no population?
+  filter(ALAND > 0) %>%        # drop reas without land
+  mutate(state_name = str_extract(NAME.y, '\\b[^,]+$')) %>%
+  rename(  state_code = STATEFP
+         , county_code = COUNTYFP) %>%
+  left_join(.                  # adds in state and county names
+            , fips_codes %>% select(state, state_code, county_code, county)
+            , by = c('state_code', 'county_code')) %>%
+  select(GEOID                 # cut out any extraneous fields
+         , starts_with('state')
+         , starts_with('county')
+         ) %>%
+  st_write(.
+           , paste0(out_dir, '/', goi, '_', str_replace(Sys.Date(), '[[:punct:]]', '-'), '.shp')
+           ); toc(); beep()
+
+# read back in, test
+tic(); (cbg_ply <- st_read(paste0(out_dir, '/', goi, '_',
+                                  str_replace(Sys.Date(), '[[:punct:]]', '-'), '.shp')) |>
+          rename(state_name = stat_nm
+                 , state_code = stat_cd
+                 , county_code = cnty_cd)); toc()
+
+
+```
+
+
+# TODO figure out why those counties fail (failed_counties)
+```{r}
+failed_counties <- c(
+  # AK
+    'Prince of Wales-Outer Ketchikan Census Area'
+  , 'Skagway-Yakutat-Angoon Census Area'
+  , 'Skagway-Hoonah-Angoon Census Area'
+  , 'Wrangell-Petersburg Census Area'
+  , 'Wade Hampton Census Area'
+
+  # FL
+  , 'Dade County'
+
+  # MT
+  , 'Yellowstone National Park'
+
+  # SD
+  , 'Shannon County'
+
+  # VA
+  , 'Bedford city'
+  , 'Clifton Forge city'
+  , 'South Boston city'
+  )
+
+
+```
+
+
+# 2 downlaod water polygons
+```{r}
+
+# tic(); for(i in state_code_abb$state[c(40, 46)]){ # Rhode Island, used for testing
+tic(); for(i in state_code_abb$state){
+  tic()
+  cat('working on:', i)
+
+  # get a state
+  fips_codes %>%
+    filter(county %nin% failed_counties) %>%
+    filter(state == i)  -> state_i
+
+  # make a state-specific subdirectory if one doesn't exist
+  ifelse(!dir.exists(paste0(file.path('data/water_polygons/', i))),
+         dir.create(file.path(paste0('data/water_polygons/', i))), FALSE)
+
+  for(j in state_i$county){
+
+    # query for counties, download, save
+    tic()
+    area_water(state = i, county = j, year = yr) %>%
+      select(!everything()) %>%
+      mutate(state = i, county = j) %>%
+      st_make_valid() %>%
+      st_write(.
+               , paste0(getwd(), '/data/water_polygons/', i, '/water_polygons_', yr, '_',
+                        j, '_', str_replace(Sys.Date(), '[[:punct:]]', '-'), '.shp')
+               )
+
+    toc() # end j loop
+    }
+  }; toc(); beep() # end i loop
+
+```
+
+
+
+# 3 read in water polygons per state, erase from cbgs (jth county in ith state at a time)
+```{r}
+
+sf_use_s2(FALSE) # suppresses errors, allows st_erase to run
+ 
+
+tic(); for(i in state_code_abb$state){ # Rhode Island, used for testing 46 = Vermont
+# tic(); for(i in state_code_abb$state[c(40, 46)]){ # Rhode Island, used for testing 46 = Vermont
+  print(i)
+
+  # create data path
+  data_path <- paste0(getwd(), '/data/water_polygons/', i, '/')
+  files     <- dir(data_path, recursive = TRUE, pattern = "*.shp") #; files # get file names
+  
+  
+  # make a state-specific subdirectory if one doesn't exist
+  ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water/', i)),
+       dir.create(file.path(paste0(file.path(out_dir), '_no_water/', i))), FALSE)
+
+  # read in water polygons per county per state and stack them all together for the ith state
+  water_state_i <- tibble(filename = files) %>%
+    mutate(file_contents = map(filename, ~ st_read(file.path(data_path, .)))) %>%
+    unnest(cols = file_contents) %>%
+    st_as_sf() %>%
+    select(state, county, geometry)
+
+  # extract cbg's per state
+  cbg_ply_state_i <- cbg_ply %>% filter(state == i) #%>% #sf::st_make_valid
+
+  # county receptacle
+  cbg_ply_state_i_no_water <- rep(list(data.frame(county = NA_character_)),0)
+
+  for(j in unique(water_state_i$county)){
+    print(j)
+
+    cbg_ply_state_i_county_j <- cbg_ply %>% filter(state == i, county == j)
+
+    water_state_i_county_j <- water_state_i %>% filter(county == j)
+
+    # in SERIES
+    # erase out water from block groups
+    # note the use of "st_erase_3" instead of "st_erase"
+    cbg_ply_state_i_no_water[[j]] <- st_erase(cbg_ply_state_i_county_j, water_state_i_county_j)
+
+    }
+
+  cbg_ply_state_i_no_water %>%
+    bind_rows() %>%
+    st_collection_extract(., "POLYGON") %>%                 # cuts out linestrings caused by slivers
+    aggregate(by = list(.$GEOID), dplyr::first) %>%         # makes multipart polygons
+    mutate(a_cbg_km2 = as.double(st_area(.) / 1e+6)) %>% # actually the cbg area now
+    st_write(.
+             , paste0(file.path(out_dir), '_no_water/', i, '/', i, '_'
+                      , str_replace(Sys.Date(), '-', '_'), '.shp')
+             )
+  }; toc() # all 52 places takes ~4 - 4.5 hours
+
+```
+
+
+# 4 fix multiparts (and asses)
+```{r}
+
+data_path <- paste0(file.path(out_dir), '_no_water/')
+files     <- dir(data_path, recursive = TRUE, pattern = "*.shp") #; files # get file names
+  
+# read in block groups (with water erased) state and stack them all together
+tic(); (
+  tibble(filename = files) %>% #slice(1:20) |> 
+    mutate(file_contents = map(filename, ~ st_read(file.path(data_path, .)))) %>%
+    unnest(cols = file_contents) %>%
+    st_as_sf() %>%
+    select(GEOID, state, county, area_cbg_km2 = a_cbg_2) |> 
+    st_cast('POLYGON') %>% 
+    # rownames_to_column(var = 'multi_part_id') %>% 
+    # filter(GEOID %in% cbg_ply_no_water_singlepart_counts$GEOID) %>% 
+    mutate(  area_single_km2   = as.double(st_area(.) / 1e+6)
+           , area_multi_prop   = (area_single_km2 / area_cbg_km2)
+           # , area_weighted_km2 = (area_cbg_km2 * area_multi_prop) # redundant?
+           ) %>% 
+    select(GEOID : county, starts_with('area_')) %>% # cosmetic reordering
+    # drop slivers, if any
+    filter(!is.na(area_multi_prop)) -> cbg_ply_no_water_singlepart #cbg_ply_muliparts
+ ); toc(); beep() # ~200 seconds
+
+# double checks
+# how is the proportion behaving?
+cbg_ply_no_water_singlepart %>% ggplot(aes(area_multi_prop)) + 
+  geom_density() +
+  # geom_histogram(binwidth = .01) +
+  NULL
+
+cbg_ply_no_water_singlepart$area_multi_prop %>% summary()
+
+
+# do the pieces add back up?
+(cbg_ply_no_water_singlepart %>%
+    st_drop_geometry() %>%
+    group_by(GEOID) %>%
+    summarise(sum_prop = sum(area_multi_prop)) %>% 
+    arrange(desc(sum_prop)) -> sum_prop_check)
+
+sum_prop_check %>% tail()
+sum_prop_check %>% summary()
+
+```
+
+# 5 save out
+```{r}
+# make a state-specific subdirectory if one doesn't exist
+ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water_single_part/'))
+       ,dir.create(paste0(file.path(out_dir), '_no_water_single_part/')), FALSE)
+
+cbg_ply_no_water_singlepart %>%
+  st_write(., paste0(file.path(out_dir), '_no_water_single_part/'
+                     , goi, '_no_water_single_part_'
+                     , str_replace(Sys.Date(), '[[:punct:]]', '-'), '.shp')
+           )
+
+# # cbg_ply_no_water_singlepart <- 
+# test <- st_read('/Users/dlocke/Census_fix/Census-geographies-no-water-single-part/data/block group_2017_no_water_single_part') |> 
+#   rename(  area_cbg_km2 = ar_cb_2
+#          , area_single_km2 = ar_sn_2
+#          , area_multi_prop = ar_mlt_)
+
+```
+
+
+# end January 19, 2022
