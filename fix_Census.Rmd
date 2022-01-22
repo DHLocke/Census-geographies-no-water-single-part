@@ -7,21 +7,18 @@ editor_options:
   chunk_output_type: console
 ---
 
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-
-Basically many block groups oftentimes have multipart polygons. So in a GIS a single row corresponds to multiple discrete and independent locations. The State of Hawaii comprised of several islands being a single row, as opposed to one row per island in a GIS is the textbook example of multipart polygons. Why this matters is because when we move Census data into other geographies like drive time polygons in this particular project, or into Baltimore City neighborhoods, we rely on the area of overlap to get Census data into those other polygons. Well that area is all messed up with multiparts since the area corresponds to all sub-polygons combined - *which might not necessarily be the ones that overlap*. 
+Basically many block groups oftentimes have multipart polygons. So in a GIS a single row corresponds to multiple discrete and independent locations. The State of Hawaii comprised of several islands being a single row, as opposed to one row per island in a GIS is the textbook example of multipart polygons. Why this matters is because when we move Census data into other geographies like drive time polygons in this particular project, or into Baltimore City neighborhoods, we rely on the area of overlap to get Census data into those other polygons. Well that area is all messed up with multiparts since the area corresponds to all sub-polygons combined - *which might not necessarily be the ones that overlap*.
 
 A second issue with the block groups for our demographic analyses (and yes I wish I realized this before publishing a few dozen papers with US Census data) is that within a block group polygon there are non-residential areas. Ok, but we don't have to go down some crazy rabbit hole of adjusting by building area, building floor area ratio... ect for every block group in the whole US, but we can improve the precision and realism of the geographic data some by erasing the water area; people don't reside in rivers, lakes, streams and other water bodies Census does map. So I erased those water features out of all block groups.
 
 The result of rectifying both the multipart polygon issue and the water issue is an improved analysis-ready set of polygons. It was very computationally intensive to do this - which might explain why this isn't widely available already, and why making this available to others might be of value.
 
-
-
 # 0 load libraries, get oriented, make a figures folder if one doesn't exist
+
 ```{r}
 # Load libraries 
 packs <-c('tidyverse'   # cuz
@@ -35,7 +32,7 @@ packs <-c('tidyverse'   # cuz
           # , 'mapview'   # web maps for zooming and panning around
           , 'beepr'     # makes noises
           , 'tictoc'    # times things
-          , 'parallel'  # parallel processing, vroom, vroom
+          # , 'parallel'  # parallel processing, vroom, vroom
           )
 
 if (length(setdiff(packs, rownames(installed.packages()))) > 0) {
@@ -43,8 +40,8 @@ if (length(setdiff(packs, rownames(installed.packages()))) > 0) {
 }
 
 # load the packages all at once
-vapply(packs, library, character.only = TRUE, logical(1),
-       logical.return = TRUE, quietly = TRUE)
+vapply(packs, library, character.only = TRUE, logical(1)
+       , logical.return = TRUE, quietly = TRUE)
 
 # get oriented
 list.files()
@@ -95,13 +92,15 @@ st_erase = function(x, y) {
 # sf_use_s2(FALSE) # suppresses errors, allows st_erase to run
 
 # if 'data' directory does not exist, make one
-ifelse(!dir.exists(paste0(file.path('data'))), dir.create(file.path(paste0('data'))), FALSE)
-ifelse(!dir.exists(paste0(file.path('data/water_polygons'))), 
-       dir.create(file.path(paste0('data/water_polygons'))), FALSE)
+ifelse(!dir.exists(paste0(file.path('data')))
+       ,dir.create(paste0(file.path('data'))), FALSE)
+
+ifelse(!dir.exists(paste0(file.path('data/water_polygons')))
+       ,dir.create(paste0(file.path('data/water_polygons'))), FALSE)
 ```
 
-
 # 1 downlaod in Census polygons (block groups)
+
 ```{r}
 
 # this gets all state, state_code, and state_name
@@ -116,11 +115,11 @@ yr <- 2017           # define year (When)
 (out_dir <- paste0(getwd(), '/data/', goi, '_', yr)) # helps put it all together
 
 # create subdirectories
-ifelse(!dir.exists(paste0(file.path(out_dir))),
-       dir.create(file.path(paste0(out_dir))), FALSE)
+ifelse(!dir.exists(paste0(file.path(out_dir)))
+       ,dir.create(paste0(file.path(out_dir))), FALSE)
 
-ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water')),
-       dir.create(file.path(paste0(file.path(out_dir), '_no_water'))), FALSE)
+ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water'))
+       ,dir.create(paste0(file.path(out_dir), '_no_water')), FALSE)
 
 
 # download polygons
@@ -137,7 +136,7 @@ tic(); cbg_ply <- get_acs(
   ) %>%
   filter(!st_is_empty(.)) %>%  # drop empty polygons
   filter(B03002_001E != 0) %>% # do you want to remove areas with no population?
-  filter(ALAND > 0) %>%        # drop reas without land
+  filter(ALAND > 0) %>%        # drop areas without land
   mutate(state_name = str_extract(NAME.y, '\\b[^,]+$')) %>%
   rename(  state_code = STATEFP
          , county_code = COUNTYFP) %>%
@@ -162,8 +161,8 @@ tic(); (cbg_ply <- st_read(paste0(out_dir, '/', goi, '_',
 
 ```
 
-
 # TODO figure out why those counties fail (failed_counties)
+
 ```{r}
 failed_counties <- c(
   # AK
@@ -191,8 +190,8 @@ failed_counties <- c(
 
 ```
 
-
 # 2 downlaod water polygons
+
 ```{r}
 
 # tic(); for(i in state_code_abb$state[c(40, 46)]){ # Rhode Island, used for testing
@@ -206,8 +205,8 @@ tic(); for(i in state_code_abb$state){
     filter(state == i)  -> state_i
 
   # make a state-specific subdirectory if one doesn't exist
-  ifelse(!dir.exists(paste0(file.path('data/water_polygons/', i))),
-         dir.create(file.path(paste0('data/water_polygons/', i))), FALSE)
+  ifelse(!dir.exists(paste0(file.path('data/water_polygons', i)))
+         ,dir.create(paste0(file.path('data/water_polygons', i))), FALSE)
 
   for(j in state_i$county){
 
@@ -228,9 +227,8 @@ tic(); for(i in state_code_abb$state){
 
 ```
 
-
-
 # 3 read in water polygons per state, erase from cbgs (jth county in ith state at a time)
+
 ```{r}
 
 sf_use_s2(FALSE) # suppresses errors, allows st_erase to run
@@ -246,8 +244,8 @@ tic(); for(i in state_code_abb$state){ # Rhode Island, used for testing 46 = Ver
   
   
   # make a state-specific subdirectory if one doesn't exist
-  ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water/', i)),
-       dir.create(file.path(paste0(file.path(out_dir), '_no_water/', i))), FALSE)
+  ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water/', i))
+         ,dir.create(paste0(file.path(out_dir), '_no_water/', i)), FALSE)
 
   # read in water polygons per county per state and stack them all together for the ith state
   water_state_i <- tibble(filename = files) %>%
@@ -289,8 +287,8 @@ tic(); for(i in state_code_abb$state){ # Rhode Island, used for testing 46 = Ver
 
 ```
 
-
 # 4 fix multiparts (and asses)
+
 ```{r}
 
 data_path <- paste0(file.path(out_dir), '_no_water/')
@@ -338,6 +336,7 @@ sum_prop_check %>% summary()
 ```
 
 # 5 save out
+
 ```{r}
 # make a state-specific subdirectory if one doesn't exist
 ifelse(!dir.exists(paste0(file.path(out_dir), '_no_water_single_part/'))
@@ -357,5 +356,4 @@ cbg_ply_no_water_singlepart %>%
 
 ```
 
-
-# end January 19, 2022
+# end January 22, 2022
